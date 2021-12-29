@@ -2,120 +2,59 @@ from __future__ import annotations
 
 from nextcord.ext import commands
 
-from pie.acl.database import ACL_rule, ACL_group
-
 from pie import i18n
+from pie.acl.database import ACLevel, ACLevelMappping
+from pie.acl.database import UserOverwrite, ChannelOverwrite, RoleOverwrite
 
 _ = i18n.Translator(__file__).translate
+T = TypeVar("T")
 
 
 def acl(ctx: commands.Context) -> bool:
-    """ACL check function.
+    """Fallback ACL."""
+    return True
 
-    :param ctx: The command context.
 
-    :return: The ACL result.
+def acl2(level: ACLevel) -> Callable[[T], T]:
+    """A decorator that adds ACL check to a command.
 
-    If the invocating user is bot owner, the access is always allowed.
-    To disallow the invocation in DMs (e.g. the function uses ``ctx.guild``
-    without checking and handling the error state), use
-    ``@commands.guild_only()``.
-
-    .. note::
-        Because nextcord.py's :class:`~nextcord.ext.commands.Bot` method
-        :meth:`~nextcord.ext.commands.Bot.is_owner()` is a coroutine, we have to
-        access the data directly, instead of loading them dynamically from the
-        API endpoint. The :attr:`~nextcord.ext.commands.Bot.owner_id`/
-        :attr:`~nextcord.ext.commands.Bot.owner_ids` argument may be ``None``:
-        that's the reason pumpkin.py refreshes it on each ``on_ready()`` event
-        in the main file.
-
-    If the context is in the DMs, access is always denied, because the ACL is
-    tied to guild IDs.
-
-    The command may be disabled globally (by setting :attr:`guild_id` to `0`).
-    In that case :class:`False` is returned.
-
-    Then a database lookup is performed. If the command rule is not found,
-    access is denied.
-
-    If the rule has user override (explicit allow, explicit deny), this override
-    is returned, and no additional checks are performed.
-
-    If the user has no roles, the default permission is returned.
-
-    User's roles are traversed from the top to the bottom. When the first role
-    with mapping to ACL group is found, the search is stopped; if the role isn't
-    mapped to ACL group, the search continues with lower role.
-
-    If the highest ACL-mapped role contains ACL information (e.g. MOD allow),
-    this information is returned. If the group isn't present in this rule,
-    its parent is looked up and used in comparison -- and so on, until decision
-    can be made.
-
-    If none of user's roles are found, the default permission is returned.
-
-    To use the check function, import it and include it as decorator:
-
-    .. code-block:: python
-        :linenos:
-
-        from core import acl, utils
-
-        ...
-
-        @commands.check(acl.check)
-        @commands.command()
-        async def repeat(self, ctx, *, input: str):
-            await ctx.reply(utils.text.sanitise(input, escape=False))
-
-    .. note::
-
-        See the ACL database tables at :class:`database.acl`.
-
-        See the command API at :class:`modules.base.acl.module.ACL`.
+    Each command has its preferred ACL group set in the decorator. Bot owner
+    can add user and channel overwrites to these decorators, to allow detailed
+    controll over the system with sane defaults provided by the system itself.
     """
-    if getattr(ctx.bot, "owner_id", 0) == ctx.author.id:
-        return True
-    if ctx.author.id in getattr(ctx.bot, "owner_ids", set()):
-        return True
 
-    # do not allow invocations in DMs
+    def predicate(ctx: commands.Context) -> bool:
+        return _acl2(ctx, level)
+
+    return commands.check(predicate)
+
+
+def _acl2(ctx: commands.Context, level: ACLevel) -> bool:
+    """Check function based on Access Control."""
+    # Allow invocations in DM.
+    # Wrap the function in `@commands.guild_only()` to change this behavior.
     if ctx.guild is None:
-        return False
+        return True
 
-    # do not allow invocations of disabled commands
-    if ACL_rule.get(0, ctx.command.qualified_name) is not None:
-        return False
+    command: str = ctx.command.qualified_name
 
-    rule = ACL_rule.get(ctx.guild.id, ctx.command.qualified_name)
+    uo = UserOverwrite.get(ctx.guild.id, ctx.author.id, command)
+    if uo is not None:
+        return uo.allow
 
-    # do not allow invocations of unknown functions
-    if rule is None:
-        return False
+    co = ChannelOverwrite.get(ctx.guild.id, ctx.channel.id, command)
+    if co is not None:
+        return co.allow
 
-    # return user override, if exists
-    for user in rule.users:
-        if ctx.author.id == user.user_id:
-            return user.allow
+    ro = RoleOverwrite.get(ctx.guild.id, ctx.author.id, command)
+    if ro is not None:
+        return uo.allow
 
-    # user has no roles, use the default for the command
-    if not hasattr(ctx.author, "roles"):
-        return rule.default
-
-    # get ACL group corresponding user's roles, ordered "from the top"
+    mapped_level = ACLevel.EVERYONE
     for role in ctx.author.roles[::-1]:
-        group = ACL_group.get_by_role(ctx.guild.id, role.id)
-        if group is not None:
+        m = ACLevelMappping.get(ctx.guild.id, role.id)
+        if m is not None:
+            mapped_level = m.level
             break
-    else:
-        group = None
 
-    while group is not None:
-        for rule_group in rule.groups:
-            if rule_group.group == group and rule_group.allow is not None:
-                return rule_group.allow
-        group = ACL_group.get(ctx.guild.id, group.parent)
-
-    # user's roles are not mapped to any ACL group, return default
-    return rule.default
+    return mapped_level >= level
