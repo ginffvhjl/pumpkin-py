@@ -3,7 +3,7 @@ from __future__ import annotations
 from nextcord.ext import commands
 
 from pie import i18n
-from pie.acl.database import ACLevel, ACLevelMappping
+from pie.acl.database import ACDefault, ACLevel, ACLevelMappping
 from pie.acl.database import UserOverwrite, ChannelOverwrite, RoleOverwrite
 
 _ = i18n.Translator(__file__).translate
@@ -56,5 +56,9 @@ def _acl2(ctx: commands.Context, level: ACLevel) -> bool:
         if m is not None:
             mapped_level = m.level
             break
+
+    custom_level = ACDefault.get(ctx.guild.id, command)
+    if custom_level:
+        level = custom_level.level
 
     return mapped_level >= level
